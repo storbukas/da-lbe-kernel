@@ -16,6 +16,7 @@
  *		Matthew Dillon, <dillon@apollo.west.oic.com>
  *		Arnt Gulbrandsen, <agulbra@nvg.unit.no>
  *		Jorge Cwik, <jorge@laser.satlink.net>
+ *		Lars Erik Storbukås <larserik@storbukas.no>
  */
 
 /*
@@ -75,6 +76,13 @@
 #include <linux/ipsec.h>
 #include <asm/unaligned.h>
 #include <linux/errqueue.h>
+
+// DA-LBE
+#include <linux/inet_diag.h>
+#include <linux/random.h>
+
+#define DALBE_EWMA_DIV	128
+#define DALBE_EWMA_LEVEL 96
 
 int sysctl_tcp_fack __read_mostly;
 int sysctl_tcp_max_reordering __read_mostly = 300;
@@ -228,10 +236,15 @@ static bool tcp_in_quickack_mode(struct sock *sk)
 		(icsk->icsk_ack.quick && !icsk->icsk_ack.pingpong);
 }
 
+// DA-LBE
 static void tcp_ecn_queue_cwr(struct tcp_sock *tp)
 {
-	if (tp->ecn_flags & TCP_ECN_OK)
-		tp->ecn_flags |= TCP_ECN_QUEUE_CWR;
+	if (tp->ecn_flags & TCP_ECN_OK) {
+		if(tp->ongoing_ecn_event == 0)
+			tp->ecn_flags |= TCP_ECN_QUEUE_CWR;
+		else
+			tp->ongoing_ecn_event = 0; // turn of phantom ECN simulation
+	}
 }
 
 static void tcp_ecn_accept_cwr(struct tcp_sock *tp, const struct sk_buff *skb)
@@ -293,10 +306,119 @@ static void tcp_ecn_rcv_syn(struct tcp_sock *tp, const struct tcphdr *th)
 		tp->ecn_flags &= ~TCP_ECN_OK;
 }
 
-static bool tcp_ecn_rcv_ecn_echo(const struct tcp_sock *tp, const struct tcphdr *th)
+// DA-LBE
+static u32 tcp_packets_in_ack(struct tcp_sock *tp, u32 delta) {
+	u32 packets;
+
+	packets = (u32) (delta / tp->mss_cache);
+	if((delta % tp->mss_cache) != 0) packets += 1;
+
+	return packets;
+}
+
+
+// DA-LBE
+static inline u64 cwnd_proportion_change(const u32 current_value, const u32 new_value) {
+	u64 calculate_proportion;
+	calculate_proportion = new_value;
+	calculate_proportion <<= sizeof(u16) * 8;
+	calculate_proportion /= current_value;
+
+	return calculate_proportion;
+}
+
+/*
+ * Perform EWMA (Exponentially Weighted Moving Average) calculation
+ * Should have a weight between 0 - 128
+ */
+static inline s64
+dalbe_ewma(s64 old, s64 new, int weight)
 {
-	if (th->ece && !th->syn && (tp->ecn_flags & TCP_ECN_OK))
-		return true;
+	u64 diff, incr;
+
+	diff = new - old;
+	incr = (DALBE_EWMA_DIV - weight) * diff / DALBE_EWMA_DIV;
+
+	return old + incr;
+}
+
+static inline bool da_lbe_mode_enabled(struct tcp_sock *tp) {
+	return tp->da_lbe_mode;
+}
+
+// DA-LBE
+static bool tcp_ecn_rcv_ecn_echo(struct tcp_sock *tp, const struct tcphdr *th, u32 packets_in_ack)
+{
+	// DA-LBE
+	if (th->ece && !th->syn && (tp->ecn_flags & TCP_ECN_OK)) {
+		tp->ecn_count += 1;
+
+		if(da_lbe_mode_enabled(tp)) {
+			u64 prevent_ecn_overflow = (u64) tp->ecn_no_backoff_probability * packets_in_ack;
+
+			u32 prevent_ecn_probability;
+			if (prevent_ecn_overflow > 0xFFFFFFFFULL) {
+				prevent_ecn_probability = 0xFFFFFFFF;
+			}
+			else {
+				prevent_ecn_probability = (u32) prevent_ecn_overflow;
+			}
+
+			u32 random_number = get_random_int();
+			if(random_number < prevent_ecn_probability) {
+				// ECN prevented
+				tcp_ecn_queue_cwr(tp);
+				return false;
+			}
+			else {
+				return true;
+			}
+		}
+		else {
+			return true;
+		}
+	}
+
+	// DA-LBE
+	if (da_lbe_mode_enabled(tp) && !th->ece && !th->syn && (tp->ecn_flags & TCP_ECN_OK)) {
+		u64 phantom_ecn_probability_overflow = (u64) tp->phantom_ecn_probability * packets_in_ack;
+
+		u32 phantom_ecn_probability;
+		if (phantom_ecn_probability_overflow > 0xFFFFFFFFULL) {
+			phantom_ecn_probability = 0xFFFFFFFF;
+		}
+		else {
+			phantom_ecn_probability = (u32) phantom_ecn_probability_overflow;
+		}
+
+		if(tp->last_congestion_indication_time.tv_sec != 0 &&
+				tp->last_congestion_indication_time.tv_nsec != 0 &&
+				tp->avg_congestion_interval &&
+				tp->ecn_congestion_delay) {
+			struct timespec now;
+			struct timespec time_since_last_congestion_indication;
+
+			now = current_kernel_time();
+			time_since_last_congestion_indication = timespec_sub(now, tp->last_congestion_indication_time);
+
+			s64 congestion_level_limit = tp->avg_congestion_interval * tp->ecn_congestion_delay;
+			s64 millisec_since_last_congestion_indication = timespec_to_ms(&time_since_last_congestion_indication);
+
+			if(!(millisec_since_last_congestion_indication < congestion_level_limit)) {
+				return false;
+			}
+		}
+
+		u32 random_number = get_random_int();
+		if(random_number < phantom_ecn_probability) {
+			tp->ongoing_ecn_event = 1;
+			tp->phantom_ecn_count += 1;
+
+			// Phantom ECN generated
+			return true;
+		}
+	}
+
 	return false;
 }
 
@@ -352,7 +474,7 @@ static void tcp_sndbuf_expand(struct sock *sk)
  * phase to predict further behaviour of this connection.
  * It is used for two goals:
  * - to enforce header prediction at sender, even when application
- *   requires some significant "application buffer". It is check #1.
+ *   requires some significant "applicaction buffer". It is check #1.
  * - to prevent pruning of receive queue because of misprediction
  *   of receiver window. Check #2.
  *
@@ -1946,12 +2068,16 @@ void tcp_enter_loss(struct sock *sk)
 	bool is_reneg;			/* is receiver reneging on SACKs? */
 	bool mark_lost;
 
+  u32 start_cwnd = tp->snd_cwnd;
+  u32 start_ssthresh = tp->snd_ssthresh;
+
 	/* Reduce ssthresh if it has not yet been made inside this window. */
 	if (icsk->icsk_ca_state <= TCP_CA_Disorder ||
 	    !after(tp->high_seq, tp->snd_una) ||
 	    (icsk->icsk_ca_state == TCP_CA_Loss && !icsk->icsk_retransmits)) {
 		tp->prior_ssthresh = tcp_current_ssthresh(sk);
 		tp->snd_ssthresh = icsk->icsk_ca_ops->ssthresh(sk);
+
 		tcp_ca_event(sk, CA_EVENT_LOSS);
 		tcp_init_undo(tp);
 	}
@@ -2475,6 +2601,10 @@ static void tcp_init_cwnd_reduction(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+	// DA-LBE
+	u32 start_ssthresh = tp->snd_ssthresh;
+	u32 start_cwnd = tp->snd_cwnd;
+
 	tp->high_seq = tp->snd_nxt;
 	tp->tlp_high_seq = 0;
 	tp->snd_cwnd_cnt = 0;
@@ -2483,6 +2613,14 @@ static void tcp_init_cwnd_reduction(struct sock *sk)
 	tp->prr_out = 0;
 	tp->snd_ssthresh = inet_csk(sk)->icsk_ca_ops->ssthresh(sk);
 	tcp_ecn_queue_cwr(tp);
+
+	// DA-LBE: cwnd proportion change
+	if(tp->snd_ssthresh < start_ssthresh) {
+		u64 calculated_proportion = cwnd_proportion_change(start_cwnd, tp->snd_ssthresh);
+
+		tp->cwnd_proportion_aggregated += calculated_proportion;
+		tp->cwnd_nr_of_proportions += 1;
+	}
 }
 
 void tcp_cwnd_reduction(struct sock *sk, int newly_acked_sacked, int flag)
@@ -2671,7 +2809,20 @@ void tcp_enter_recovery(struct sock *sk, bool ece_ack)
 	if (!tcp_in_cwnd_reduction(sk)) {
 		if (!ece_ack)
 			tp->prior_ssthresh = tcp_current_ssthresh(sk);
-		tcp_init_cwnd_reduction(sk);
+
+		// DA-LBE
+		if(da_lbe_mode_enabled(tp)) {
+			u32 random_number = get_random_int();
+			if(random_number < tp->cwnd_no_backoff_probability) {
+				tp->undo_marker = 0; // avoided CWND change
+			}
+			else {
+				tcp_init_cwnd_reduction(sk); // reduce CWND reduction
+			}
+		}
+		else {
+			tcp_init_cwnd_reduction(sk); // default behaviour
+		}
 	}
 	tcp_set_ca_state(sk, TCP_CA_Recovery);
 }
@@ -2811,6 +2962,39 @@ static void tcp_fastretrans_alert(struct sock *sk, const int acked,
 	 * A. ECE, hence prohibit cwnd undoing, the reduction is required. */
 	if (flag & FLAG_ECE)
 		tp->prior_ssthresh = 0;
+
+	// DA-LBE
+	if (da_lbe_mode_enabled(tp)) {
+		tp->congestion_event_count += 1;
+
+		// check if last_congestion_indication_time have been set
+		if(tp->last_congestion_indication_time.tv_sec != 0 &&
+				tp->last_congestion_indication_time.tv_nsec != 0) {
+			struct timespec now;
+			struct timespec interval;
+			now = current_kernel_time();
+			interval = timespec_sub(now, tp->last_congestion_indication_time);
+
+			// use default ewma weight/level if not set or if empty
+			if(tp->ewma_weight || tp->ewma_weight == 0)
+				tp->ewma_weight = DALBE_EWMA_LEVEL;
+
+			if(tp->avg_congestion_interval) {
+				// add interval average usnig ewma
+				tp->avg_congestion_interval = dalbe_ewma(
+								tp->avg_congestion_interval,
+								timespec_to_ms(&interval),
+								tp->ewma_weight
+								);
+			} else {
+				// first time adding interval, do not ewma
+				tp->avg_congestion_interval = timespec_to_ms(&interval);
+			}
+		}
+
+		// store the time of this congestion event
+		tp->last_congestion_indication_time = current_kernel_time();
+	}
 
 	/* B. In all the states check for reneging SACKs. */
 	if (tcp_check_sack_reneging(sk, flag))
@@ -2973,7 +3157,6 @@ void tcp_synack_rtt_meas(struct sock *sk, struct request_sock *req)
 
 	tcp_ack_update_rtt(sk, FLAG_SYN_ACKED, rtt_us, -1L, rtt_us, &rs);
 }
-
 
 static void tcp_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 {
@@ -3212,9 +3395,54 @@ static int tcp_clean_rtx_queue(struct sock *sk, int prior_fackets,
 	}
 
 	if (icsk->icsk_ca_ops->pkts_acked) {
-		struct ack_sample sample = { .pkts_acked = pkts_acked,
-					     .rtt_us = sack->rate->rtt_us,
-					     .in_flight = last_in_flight };
+		u32 adjusted_rtt = (u32) ca_rtt_us;
+
+		// DA-LBE
+		if(da_lbe_mode_enabled(tp) && tp->delay_based_mode) {
+			u64 congestion_price_calculation;
+
+			if(tp->base_rtt_based) {
+				union tcp_cc_info info;
+				size_t sz = 0;
+				int attr;
+				u32 base_rtt;
+				long rtt_difference;
+
+				if (icsk->icsk_ca_ops->get_info) {
+				sz = icsk->icsk_ca_ops->get_info(sk, ~0U, &attr, &info);
+
+				if(info.vegas.tcpv_rtt &&
+					info.vegas.tcpv_rtt < 0x7fffffff &&
+					info.vegas.tcpv_rttcnt > 2) {
+					
+					base_rtt = info.vegas.tcpv_rtt;
+
+					if(adjusted_rtt - base_rtt > 0) {
+						congestion_price_calculation = adjusted_rtt - base_rtt;
+						congestion_price_calculation *= tp->congestion_price_adjustment;
+						congestion_price_calculation = (u64) congestion_price_calculation / USHRT_MAX;
+
+						adjusted_rtt = base_rtt + (u32) congestion_price_calculation;
+					}
+				}
+			}
+		}
+		else {
+			congestion_price_calculation = adjusted_rtt;
+			congestion_price_calculation *= tp->congestion_price_adjustment;
+
+			if(congestion_price_calculation > 0)
+				congestion_price_calculation = (u64) congestion_price_calculation / USHRT_MAX;
+
+				adjusted_rtt = (u32) congestion_price_calculation;
+			}
+		}
+
+		struct ack_sample sample = {
+			.pkts_acked = pkts_acked,
+			.rtt_us = adjusted_rtt,
+			.in_flight = last_in_flight
+		};
 
 		icsk->icsk_ca_ops->pkts_acked(sk, &sample);
 	}
@@ -3333,6 +3561,12 @@ static void tcp_snd_una_update(struct tcp_sock *tp, u32 ack)
 	sock_owned_by_me((struct sock *)tp);
 	tp->bytes_acked += delta;
 	tp->snd_una = ack;
+
+	// DA-LBE
+	u32 packets = (u32) (delta / tp->mss_cache);
+	if((delta % tp->mss_cache) != 0) packets += 1;
+
+	tp->packets_acked += packets;
 }
 
 /* If we update tp->rcv_nxt, also update tp->bytes_received */
@@ -3555,6 +3789,9 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	int acked = 0; /* Number of packets newly acked */
 	int rexmit = REXMIT_NONE; /* Flag to (re)transmit to recover losses */
 
+	// DA-LBE
+	tp->da_lbe_mode = sk->sk_da_lbe_mode;
+
 	sack_state.first_sackt = 0;
 	sack_state.rate = &rs;
 
@@ -3617,13 +3854,18 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 		else
 			NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPPUREACKS);
 
+		// DA-LBE
+		u32 delta = ack - tp->snd_una;
+		u32 packets_in_ack = tcp_packets_in_ack(tp, delta);
+
 		flag |= tcp_ack_update_window(sk, skb, ack, ack_seq);
 
 		if (TCP_SKB_CB(skb)->sacked)
 			flag |= tcp_sacktag_write_queue(sk, skb, prior_snd_una,
 							&sack_state);
 
-		if (tcp_ecn_rcv_ecn_echo(tp, tcp_hdr(skb))) {
+		// DA-LBE
+		if (tcp_ecn_rcv_ecn_echo(tp, tcp_hdr(skb), packets_in_ack)) {
 			flag |= FLAG_ECE;
 			ack_ev_flags |= CA_ACK_ECE;
 		}

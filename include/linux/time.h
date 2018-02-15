@@ -234,6 +234,25 @@ static inline s64 timespec_to_ns(const struct timespec *ts)
 }
 
 /**
+ * timespec_to_ms - Convert timespec to milliseconds
+ * @ts:		pointer to the timespec variable to be converted
+ *
+ * Returns the scalar milliseconds representation of the timespec
+ * parameter.
+ */
+static inline s64 timespec_to_ms(const struct timespec *ts)
+{
+	s64 seconds_ms, microseconds_ms;
+
+	seconds_ms = ts->tv_sec;
+	seconds_ms *= 1000LLU;
+	microseconds_ms = ts->tv_nsec;
+	microseconds_ms /= 1000000LLU;
+
+	return seconds_ms + microseconds_ms;
+}
+
+/**
  * timeval_to_ns - Convert timeval to nanoseconds
  * @ts:		pointer to the timeval variable to be converted
  *

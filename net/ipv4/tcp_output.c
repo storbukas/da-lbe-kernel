@@ -375,7 +375,7 @@ static void tcp_ecn_send(struct sock *sk, struct sk_buff *skb,
 		if (skb->len != tcp_header_len &&
 		    !before(TCP_SKB_CB(skb)->seq, tp->snd_nxt)) {
 			INET_ECN_xmit(sk);
-			if (tp->ecn_flags & TCP_ECN_QUEUE_CWR) {
+			if (tp->ecn_flags & TCP_ECN_QUEUE_CWR) { // DA-LBE
 				tp->ecn_flags &= ~TCP_ECN_QUEUE_CWR;
 				th->cwr = 1;
 				skb_shinfo(skb)->gso_type |= SKB_GSO_TCP_ECN;
@@ -2808,7 +2808,6 @@ int __tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs)
 	unsigned int cur_mss;
 	int diff, len, err;
 
-
 	/* Inconclusive MTU probe */
 	if (icsk->icsk_mtup.probe_size)
 		icsk->icsk_mtup.probe_size = 0;
@@ -2872,6 +2871,13 @@ int __tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs)
 	if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_SYN)
 		__NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPSYNRETRANS);
 	tp->total_retrans += segs;
+
+	// DA-LBE
+	if (icsk->icsk_ca_state == TCP_CA_Loss) {
+		tp->slow_retrans += 1;
+	} else {
+		tp->fast_retrans += 1;
+	}
 
 	/* make sure skb->data is aligned on arches that require it
 	 * and check if ack-trimming & collapsing extended the headroom
@@ -2981,6 +2987,7 @@ void tcp_xmit_retransmit_queue(struct sock *sk)
 			continue;
 
 		} else {
+			// DA-LBE
 			if (icsk->icsk_ca_state != TCP_CA_Loss)
 				mib_idx = LINUX_MIB_TCPFASTRETRANS;
 			else

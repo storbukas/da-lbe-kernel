@@ -327,6 +327,36 @@ struct tcp_sock {
 	int	undo_retrans;	/* number of undoable retransmissions. */
 	u32	total_retrans;	/* Total retransmits for entire connection */
 
+	// DA-LBE: Added variables needed to count in tcp_output.c
+	u32 da_lbe_mode;
+
+	u32 slow_retrans;
+	u32 fast_retrans;
+	u32 packets_acked;
+
+	u32 congestion_event_count;
+	u32 ecn_count;
+	u32 phantom_ecn_count;
+	u32 phantom_ecn_probability;
+	u32 ongoing_ecn_event;
+
+	struct timespec last_congestion_indication_time;
+	u32 ecn_congestion_delay;
+	s64 avg_congestion_interval;
+	u32 ewma_weight;
+
+	u32 ecn_no_backoff_probability;
+	u32 cwnd_no_backoff_probability;
+
+	u32 delay_based_mode;
+	u32 base_rtt_based;
+	u32 congestion_price_adjustment;
+
+	u64 cwnd_proportion_aggregated;
+	u32 cwnd_nr_of_proportions;
+
+	// END: DA-LBE
+
 	u32	urg_seq;	/* Seq of received urgent pointer */
 	unsigned int		keepalive_time;	  /* time before keep alive takes place */
 	unsigned int		keepalive_intvl;  /* time interval between keep alive probes */

@@ -173,6 +173,7 @@ struct sock_common {
 
 	unsigned short		skc_family;
 	volatile unsigned char	skc_state;
+	volatile unsigned char  skc_da_lbe_mode; // DA-LBE
 	unsigned char		skc_reuse:4;
 	unsigned char		skc_reuseport:1;
 	unsigned char		skc_ipv6only:1;
@@ -349,6 +350,9 @@ struct sock {
 #define sk_incoming_cpu		__sk_common.skc_incoming_cpu
 #define sk_flags		__sk_common.skc_flags
 #define sk_rxhash		__sk_common.skc_rxhash
+
+// DA-LBE
+#define sk_da_lbe_mode    __sk_common.skc_da_lbe_mode
 
 	socket_lock_t		sk_lock;
 	atomic_t		sk_drops;
@@ -2348,6 +2352,33 @@ static inline int sk_state_load(const struct sock *sk)
 static inline void sk_state_store(struct sock *sk, int newstate)
 {
 	smp_store_release(&sk->sk_state, newstate);
+}
+
+// DA-LBE
+/**
+ * sk_da_lbe_mode_load - read sk->sk_da_lbe_mode for lockless contexts
+ * @sk: socket pointer
+ *
+ * Paired with sk_da_lbe_mode_store(). Used in places we do not hold socket lock :
+ * da_lbe_get_info() ...
+ */
+static inline int sk_da_lbe_mode_load(const struct sock *sk)
+{
+	return smp_load_acquire(&sk->sk_da_lbe_mode);
+}
+
+// DA-LBE
+/**
+ * sk_da_lbe_mode_store - update sk->sk_da_lbe_mode
+ * @sk: socket pointer
+ * @new_mode: new mode
+ *
+ * Paired with sk_da_lbe_mode_load(). Should be used in contexts where
+ * state change might impact lockless readers.
+ */
+static inline void sk_da_lbe_mode_store(struct sock *sk, int new_mode)
+{
+	smp_store_release(&sk->sk_da_lbe_mode, new_mode);
 }
 
 void sock_enable_timestamp(struct sock *sk, int flag);

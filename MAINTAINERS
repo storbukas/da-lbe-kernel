@@ -3865,6 +3865,20 @@ L:	linux-input@vger.kernel.org
 S:	Supported
 F:	drivers/input/dlink-dir685-touchkeys.c
 
+DA-LBE FRAMEWORK
+M:	Lars Erik Storbukås <larserik@storbukas.no>
+S:	Maintained
+F:	include/linux/tcp.h
+F:	include/linux/time.h
+F:	include/net/da_lbe_states.h
+F:	include/net/sock.h
+F:	include/net/tcp.h
+F:	include/uapi/linux/tcp.h
+F:	net/ipv4/tcp.c
+F:	net/ipv4/tcp_input.c
+F:	net/ipv4/tcp_ipv4.c
+F:	net/ipv4/tcp_output.c
+
 DALLAS/MAXIM DS1685-FAMILY REAL TIME CLOCK
 M:	Joshua Kinard <kumba@gentoo.org>
 S:	Maintained

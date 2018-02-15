@@ -50,7 +50,7 @@ struct tcphdr {
 		fin:1;
 #else
 #error	"Adjust your <asm/byteorder.h> defines"
-#endif	
+#endif 
 	__be16	window;
 	__sum16	check;
 	__be16	urg_ptr;
@@ -79,7 +79,13 @@ enum {
 	TCP_FLAG_FIN = __constant_cpu_to_be32(0x00010000),
 	TCP_RESERVED_BITS = __constant_cpu_to_be32(0x0F000000),
 	TCP_DATA_OFFSET = __constant_cpu_to_be32(0xF0000000)
-}; 
+};
+
+// DA-LBE
+enum {
+	TCP_DA_LBE_ENABLED = 1,
+	TCP_DA_LBE_DISABLED
+};
 
 /*
  * TCP general constants
@@ -119,6 +125,18 @@ enum {
 #define TCP_FASTOPEN_CONNECT	30	/* Attempt FastOpen with connect */
 #define TCP_ULP			31	/* Attach a ULP to a TCP connection */
 #define TCP_MD5SIG_EXT		32	/* TCP MD5 Signature with extensions */
+
+// DA-LBE
+#define DA_LBE_INFO			33
+#define DA_LBE_INFO_ECN			34
+#define DA_LBE_MODE			35
+#define DA_LBE_ECN_BACKOFF		36
+#define DA_LBE_CWND_BACKOFF		37
+#define DA_LBE_CONGESTION_PRICE		38
+#define DA_LBE_BASE_RTT_BASED		39
+#define DA_LBE_DELAY_BASED_MODE 	40
+#define DA_LBE_ECN_CONGESTION_DELAY 	41
+#define DA_LBE_EWMA_WEIGHT 		42
 
 struct tcp_repair_opt {
 	__u32	opt_code;
@@ -160,6 +178,31 @@ enum tcp_ca_state {
 #define TCPF_CA_Recovery (1<<TCP_CA_Recovery)
 	TCP_CA_Loss = 4
 #define TCPF_CA_Loss	(1<<TCP_CA_Loss)
+};
+
+// DA-LBE
+struct da_lbe_info {
+	__u8	dalbe_state;
+	__u8	dalbe_ca_state;
+	__u8	dalbe_options;
+
+	__u32	dalbe_fast_retransmits;
+	__u32	dalbe_slow_retransmits;
+
+	__u32	dalbe_snd_cwnd;
+	__u32	dalbe_snd_mss;
+	__u32	dalbe_snd_ssthresh;
+	__u32	dalbe_packets_acked;
+	__u64	dalbe_bytes_acked;
+
+	__u32	dalbe_ecn_count;
+	__u32	dalbe_phantom_ecn_count;
+
+	__s64	dalbe_avg_congestion_interval;
+	__u32	dalbe_congestion_event_count;
+
+	__u64	dalbe_cwnd_proportion_aggregated;
+	__u32	dalbe_cwnd_nr_of_proportions;
 };
 
 struct tcp_info {

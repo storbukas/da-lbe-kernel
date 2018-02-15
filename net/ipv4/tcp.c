@@ -2766,6 +2766,63 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 		tp->notsent_lowat = val;
 		sk->sk_write_space(sk);
 		break;
+	case DA_LBE_INFO_ECN: // DA-LBE
+		tp->phantom_ecn_probability = val;
+		break;
+	case DA_LBE_ECN_BACKOFF: // DA-LBE
+		tp->ecn_no_backoff_probability = val;
+		break;
+	case DA_LBE_CWND_BACKOFF: // DA-LBE
+		tp->cwnd_no_backoff_probability = val;
+		break;
+	case DA_LBE_MODE: // DA-LBE
+		switch(val) {
+			case TCP_DA_LBE_ENABLED:
+				sk->sk_da_lbe_mode = DA_LBE_ENABLED;
+				break;
+			case TCP_DA_LBE_DISABLED:
+				sk->sk_da_lbe_mode = DA_LBE_DISABLED;
+				break;
+			default:
+				err = -EOPNOTSUPP;
+				break;
+		}
+		break;
+	case DA_LBE_DELAY_BASED_MODE: // DA-LBE
+		switch(val) {
+			case TCP_DA_LBE_ENABLED:
+				tp->delay_based_mode = DA_LBE_ENABLED;
+				break;
+			case TCP_DA_LBE_DISABLED:
+				tp->delay_based_mode = DA_LBE_DISABLED;
+				break;
+			default:
+				err = -EOPNOTSUPP;
+				break;
+		}
+		break;
+	case DA_LBE_CONGESTION_PRICE: // DA-LBE
+		tp->congestion_price_adjustment = val;
+		break;
+	case DA_LBE_BASE_RTT_BASED: // DA-LBE
+		switch(val) {
+			case TCP_DA_LBE_ENABLED:
+				tp->base_rtt_based = DA_LBE_ENABLED;
+				break;
+			case TCP_DA_LBE_DISABLED:
+				tp->base_rtt_based = DA_LBE_DISABLED;
+				break;
+			default:
+				err = -EOPNOTSUPP;
+				break;
+		}
+		break;
+	case DA_LBE_ECN_CONGESTION_DELAY: // DA-LBE
+		tp->ecn_congestion_delay = val;
+		break;
+	case DA_LBE_EWMA_WEIGHT: // DA-LBE
+		tp->ewma_weight = val;
+		break;
 	default:
 		err = -ENOPROTOOPT;
 		break;
@@ -2933,6 +2990,50 @@ void tcp_get_info(struct sock *sk, struct tcp_info *info)
 }
 EXPORT_SYMBOL_GPL(tcp_get_info);
 
+// DA-LBE
+/* Return information about state of DA_LBE framework - endpoint in API format. */
+void da_lbe_get_info(struct sock *sk, struct da_lbe_info *info)
+{
+	const struct tcp_sock *tp = tcp_sk(sk);
+	const struct inet_connection_sock *icsk = inet_csk(sk);
+	bool slow;
+	u32 rate;
+
+	memset(info, 0, sizeof(*info));
+	if (sk->sk_type != SOCK_STREAM)
+		return;
+
+	info->dalbe_state = sk_state_load(sk);
+
+	slow = lock_sock_fast(sk);
+
+	info->dalbe_ca_state = icsk->icsk_ca_state;
+
+	if (tp->ecn_flags & TCP_ECN_OK)
+		info->dalbe_options |= TCPI_OPT_ECN;
+
+	info->dalbe_fast_retransmits = tp->fast_retrans;
+	info->dalbe_slow_retransmits = tp->slow_retrans;
+
+	info->dalbe_snd_cwnd = tp->snd_cwnd;
+	info->dalbe_snd_mss = tp->mss_cache;
+	info->dalbe_snd_ssthresh = tp->snd_ssthresh;
+	info->dalbe_packets_acked = tp->packets_acked;
+	info->dalbe_bytes_acked = tp->bytes_acked;
+
+	info->dalbe_ecn_count = tp->ecn_count;
+	info->dalbe_phantom_ecn_count = tp->phantom_ecn_count;
+
+	info->dalbe_avg_congestion_interval = tp->avg_congestion_interval;
+	info->dalbe_congestion_event_count = tp->congestion_event_count;
+
+	info->dalbe_cwnd_proportion_aggregated = tp->cwnd_proportion_aggregated;
+	info->dalbe_cwnd_nr_of_proportions = tp->cwnd_nr_of_proportions;
+
+	unlock_sock_fast(sk, slow);
+}
+EXPORT_SYMBOL_GPL(da_lbe_get_info);
+
 struct sk_buff *tcp_get_timestamping_opt_stats(const struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
@@ -3024,6 +3125,24 @@ static int do_tcp_getsockopt(struct sock *sk, int level,
 			return -EFAULT;
 		if (copy_to_user(optval, &info, len))
 			return -EFAULT;
+		return 0;
+	}
+	case  DA_LBE_INFO: { // DA-LBE
+		struct da_lbe_info info;
+
+		if (get_user(len, optlen))
+			return -EFAULT;
+
+		da_lbe_get_info(sk, &info);
+
+		len = min_t(unsigned int, len, sizeof(info));
+		
+		if (put_user(len, optlen))
+			return -EFAULT;
+		
+		if (copy_to_user(optval, &info, len))
+			return -EFAULT;
+		
 		return 0;
 	}
 	case TCP_CC_INFO: {
