@@ -1,5 +1,7 @@
 # DA-LBE Linux Kernel Framework #
 
+The DA-LBE Linux Kernel Framework. Implementing Less than Best Effort with Deadlines in the Linux Kernel as a contribution to the New, Evolutive API and Transport-Layer (NEAT) Architecture for the Internet.
+
 A Deadline Aware, Less Than Best Effort framework implemented in the Linux Kernel, providing mechanisms which allow an arbitrary Congestion Control (CC) to behave Less than Best Effort (LBE) with the notion of time in order to complete within given a soft deadline.
 
 
